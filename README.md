@@ -225,10 +225,9 @@ See the LICENSE file for details.
 
 **Shashank Gupta**
 
-School of Medical Sciences
-
+Researcher, 
+School of Medical Sciences, 
 Örebro University
-
 Sweden
 
 GitHub:
