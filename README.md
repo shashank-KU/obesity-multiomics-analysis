@@ -70,12 +70,12 @@ obesity-multiomics-analysis
 ┌──────────────────────────────┐                     ┌──────────────────────────┐
 │ Longitudinal Statistics      │                     │ Network Analysis         │
 ├──────────────────────────────┤                     ├──────────────────────────┤
-│ • Linear mixed models        │                     │ • WGCNA                 │
-│ • Estimated marginal means   │                     │ • Soft thresholding     │
-│ • Pairwise contrasts         │                     │ • Module detection      │
-│ • Phase comparisons          │                     │ • Eigengene calculation │
-│ • Group × Time interaction   │                     │ • Module–trait analysis │
-│ • Group × Phase interaction  │                     │ • Hub feature detection │
+│ • Linear mixed models        │                     │ • WGCNA                  │
+│ • Estimated marginal means   │                     │ • Soft thresholding      │
+│ • Pairwise contrasts         │                     │ • Module detection       │
+│ • Phase comparisons          │                     │ • Eigengene calculation  │
+│ • Group × Time interaction   │                     │ • Module–trait analysis  │
+│ • Group × Phase interaction  │                     │ • Hub feature detection  │
 │ • FDR correction             │                     │                          │
 └──────────────────────────────┘                     └──────────────────────────┘
         │                                                             │
