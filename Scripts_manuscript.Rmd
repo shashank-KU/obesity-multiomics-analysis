@@ -1,0 +1,920 @@
+---
+title: "Lipidomics, Metabolomics and PFAS Across Weight Loss and Regain"
+author: "Analysis pipeline"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    theme: flatly
+  pdf_document:
+    toc: true
+params:
+  project_dir: "/Users/skga/Desktop/Johan_Project"
+  metadata_file: "Metadata.xlsx"
+  sample_id_column: "Lipidomics_Samples"
+  n_threads: 1
+  fdr_cutoff: 0.10
+---
+
+# Analysis overview
+
+This is the final non-redundant pipeline used to generate the manuscript analyses and outputs. It retains baseline, 6-month, and 12-month samples, applies one harmonized preprocessing workflow, fits the prespecified mixed-effects models, and exports each manuscript figure and supplementary table once.
+
+**Manuscript output map**
+
+- **Table 1:** Participant characteristics by timepoint and randomized group
+- **Figure 1:** PCA of lipidomic and metabolomic profiles
+- **Figure 2:** Selected lipidomic and metabolomic temporal changes
+- **Figure 3:** WGCNA module-trait heatmaps
+- **Figure 4:** Adjusted PFAS trajectories by randomized group
+- **Supplementary Table S1:** Complete lipidomic temporal contrasts
+- **Supplementary Table S2:** Complete metabolomic temporal contrasts
+- **Supplementary Table S3:** WGCNA module-trait associations
+- **Supplementary Table S4:** WGCNA module membership and annotation
+- **Supplementary Table S5:** Analytical methods, maintained separately in the manuscript supplement
+- **Supplementary Table S6:** Randomization-by-timepoint interaction results
+- **Supplementary Table S7:** Randomization-by-phase interaction results
+
+# 0. Setup
+
+```{r setup}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE, error = FALSE,
+  fig.align = "center", dpi = 300
+)
+
+required_packages <- c(
+  "tidyverse", "readxl", "lme4", "lmerTest", "emmeans", "broom.mixed",
+  "WGCNA", "pheatmap", "patchwork", "openxlsx", "ggrepel", "gridExtra"
+)
+missing_packages <- required_packages[
+  !vapply(required_packages, requireNamespace, quietly = TRUE, FUN.VALUE = logical(1))
+]
+if (length(missing_packages) > 0) {
+  stop("Install missing packages before knitting: ", paste(missing_packages, collapse = ", "))
+}
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(readxl)
+  library(lme4)
+  library(lmerTest)
+  library(emmeans)
+  library(broom.mixed)
+  library(WGCNA)
+  library(pheatmap)
+  library(patchwork)
+  library(openxlsx)
+  library(ggrepel)
+  library(gridExtra)
+})
+
+set.seed(42)
+WGCNA::disableWGCNAThreads()
+if (params$n_threads > 1) WGCNA::enableWGCNAThreads(nThreads = params$n_threads)
+
+project_dir <- normalizePath(params$project_dir, mustWork = TRUE)
+metadata_path <- file.path(project_dir, params$metadata_file)
+out_fig <- file.path(project_dir, "outputs", "figures")
+out_tab <- file.path(project_dir, "outputs", "tables")
+dir.create(out_fig, recursive = TRUE, showWarnings = FALSE)
+dir.create(out_tab, recursive = TRUE, showWarnings = FALSE)
+
+exclude_12m_ids <- c(2, 14, 22, 30, 84, 128, 159, 167, 21, 40, 139)
+fdr_cutoff <- params$fdr_cutoff
+
+time_levels <- c("BL", "6M", "12M")
+group_levels <- c("CBT only", "IGB + CBT")
+time_palette <- c(BL = "#0072B2", `6M` = "#E69F00", `12M` = "#009E73")
+group_palette <- c(`CBT only` = "#2166AC", `IGB + CBT` = "#B2182B")
+sig_palette <- c(`FDR <= 0.10` = "#D62728", `Nominal p < 0.05` = "#FF7F0E", NS = "#BDBDBD")
+
+save_figure <- function(plot, stem, width, height) {
+  ggsave(file.path(out_fig, paste0(stem, ".pdf")), plot, width = width, height = height, device = cairo_pdf)
+  ggsave(file.path(out_fig, paste0(stem, ".png")), plot, width = width, height = height, dpi = 400)
+}
+
+safe_numeric <- function(x) suppressWarnings(as.numeric(as.character(x)))
+
+feature_key <- function(x) {
+  key <- stringr::str_extract(stringr::str_to_upper(x), "^ROWID_[0-9]+")
+  dplyr::coalesce(key, stringr::str_to_upper(x))
+}
+
+significance_label <- function(p, fdr) {
+  factor(
+    dplyr::case_when(
+      !is.na(fdr) & fdr <= fdr_cutoff ~ "FDR <= 0.10",
+      !is.na(p) & p < 0.05 ~ "Nominal p < 0.05",
+      TRUE ~ "NS"
+    ),
+    levels = c("FDR <= 0.10", "Nominal p < 0.05", "NS")
+  )
+}
+```
+
+# 1. Data loading and validation
+
+## 1.1 Metadata
+
+```{r load-metadata}
+metadata_raw <- readxl::read_excel(metadata_path)
+if (!params$sample_id_column %in% names(metadata_raw)) {
+  stop("Sample-ID column not found in metadata: ", params$sample_id_column)
+}
+
+metadata <- metadata_raw %>%
+  rename(SampleID = all_of(params$sample_id_column)) %>%
+  filter(Timepoint_BL1_6M2_12M3 %in% 1:3, StudyNr != 2) %>%
+  mutate(
+    SampleID = as.character(SampleID),
+    StudyNr = as.character(StudyNr),
+    Timepoint = factor(Timepoint_BL1_6M2_12M3, levels = 1:3, labels = time_levels),
+    Group = factor(Randomisation, levels = sort(unique(Randomisation)), labels = group_levels),
+    Sex = factor(Sex),
+    Age = safe_numeric(Age_at_inclusion),
+    BMI = safe_numeric(BMI)
+  ) %>%
+  filter(!(StudyNr %in% as.character(exclude_12m_ids) & Timepoint == "12M"))
+
+if (anyDuplicated(metadata$SampleID)) stop("Duplicated SampleID values detected in metadata.")
+if (anyNA(metadata$SampleID)) stop("Missing SampleID values detected in metadata.")
+```
+
+## 1.2 Shared import, annotation, and alignment functions
+
+```{r import-functions}
+read_feature_matrix <- function(path) {
+  x <- readxl::read_excel(path) %>% as.data.frame()
+  if (!"id" %in% names(x)) stop("Expected an 'id' column in ", path)
+  rownames(x) <- make.unique(as.character(x$id))
+  x$id <- NULL
+  names(x) <- sub("^X", "", names(x))
+  x[] <- lapply(x, safe_numeric)
+  x <- as.data.frame(t(as.matrix(x)), check.names = FALSE)
+  x[x == 0] <- NA_real_
+  x
+}
+
+read_annotation <- function(path) {
+  ann <- readxl::read_excel(path) %>% as.data.frame()
+  id_col <- intersect(c("Exposure", "id", "Feature"), names(ann))[1]
+  if (is.na(id_col)) stop("No feature-ID column found in annotation file: ", path)
+  ann <- ann %>% rename(annotation_feature = all_of(id_col))
+  family_value <- if ("Family" %in% names(ann)) as.character(ann$Family) else rep(NA_character_, nrow(ann))
+  ann %>%
+    mutate(
+      annotation_feature = as.character(annotation_feature),
+      join_key = feature_key(annotation_feature),
+      annotation_name = coalesce(
+        family_value,
+        str_remove(annotation_feature, regex("^rowid_[0-9]+_", ignore_case = TRUE)),
+        annotation_feature
+      )
+    ) %>%
+    distinct(join_key, .keep_all = TRUE)
+}
+
+align_platform <- function(exposure_matrix, metadata_df, label) {
+  common <- intersect(rownames(exposure_matrix), metadata_df$SampleID)
+  if (length(common) == 0) stop(label, ": no matched sample IDs.")
+  meta <- metadata_df %>% filter(SampleID %in% common)
+  participant_counts <- table(meta$StudyNr)
+  eligible <- names(participant_counts[participant_counts >= 2])
+  meta <- meta %>% filter(StudyNr %in% eligible) %>% arrange(match(SampleID, common))
+  mat <- exposure_matrix[meta$SampleID, , drop = FALSE]
+  stopifnot(identical(rownames(mat), meta$SampleID))
+  message(label, ": ", nrow(mat), " observations, ", n_distinct(meta$StudyNr),
+          " participants, ", ncol(mat), " raw features.")
+  list(raw = mat, metadata = meta)
+}
+```
+
+## 1.3 Lipidomics and metabolomics
+
+```{r load-omics}
+lipid_raw <- read_feature_matrix(file.path(project_dir, "Lipidomics", "exposures.xlsx"))
+metab_all_raw <- read_feature_matrix(file.path(project_dir, "Metabolomics", "exposures.xlsx"))
+
+lipid_annotation <- read_annotation(file.path(project_dir, "Lipidomics", "description.xlsx"))
+metab_annotation <- read_annotation(file.path(project_dir, "Metabolomics", "description.xlsx"))
+
+# PFAS are analyzed separately, not as untargeted metabolite features.
+pfas_columns <- names(metab_all_raw)[str_detect(names(metab_all_raw), regex("PF", ignore_case = TRUE))]
+metab_raw <- metab_all_raw[, setdiff(names(metab_all_raw), pfas_columns), drop = FALSE]
+pfas_raw <- metab_all_raw[, pfas_columns, drop = FALSE]
+
+lipid_data <- align_platform(lipid_raw, metadata, "Lipidomics")
+metab_data <- align_platform(metab_raw, metadata, "Metabolomics")
+pfas_data <- align_platform(pfas_raw, metadata, "PFAS")
+```
+
+# 2. Preprocessing
+
+The untargeted platforms use feature-wise missingness filtering, half-minimum imputation, log2 transformation, and autoscaling. PFAS use half-minimum imputation and log2 transformation without autoscaling, preserving interpretable log2-scale contrasts.
+
+```{r preprocessing}
+preprocess_omics <- function(mat, missing_cutoff = 0.20, autoscale = TRUE, label = "") {
+  mat <- as.data.frame(mat, check.names = FALSE)
+  keep <- colMeans(is.na(mat)) <= missing_cutoff
+  mat <- mat[, keep, drop = FALSE]
+  if (ncol(mat) == 0) stop(label, ": no features remained after missingness filtering.")
+
+  for (j in seq_len(ncol(mat))) {
+    x <- safe_numeric(mat[[j]])
+    observed <- x[is.finite(x) & x > 0]
+    if (length(observed) == 0) stop(label, ": all values missing/non-positive for ", names(mat)[j])
+    x[!is.finite(x) | x <= 0] <- min(observed) / 2
+    mat[[j]] <- log2(x)
+  }
+
+  if (autoscale) {
+    scaled <- scale(mat)
+    zero_sd <- !is.finite(attr(scaled, "scaled:scale")) | attr(scaled, "scaled:scale") == 0
+    if (any(zero_sd)) scaled <- scaled[, !zero_sd, drop = FALSE]
+    mat <- as.data.frame(scaled, check.names = FALSE)
+  }
+
+  stopifnot(!anyNA(mat), identical(rownames(mat), rownames(mat)))
+  message(label, ": retained ", ncol(mat), " features.")
+  mat
+}
+
+norm_lipids <- preprocess_omics(lipid_data$raw, autoscale = TRUE, label = "Lipidomics")
+norm_metab <- preprocess_omics(metab_data$raw, autoscale = TRUE, label = "Metabolomics")
+log2_pfas <- preprocess_omics(pfas_data$raw, missing_cutoff = 1, autoscale = FALSE, label = "PFAS")
+```
+
+# 3. Core statistical models
+
+All feature-level models adjust for baseline age, sex, and time-varying BMI, with a participant-specific random intercept. False-discovery rates are controlled using the Benjamini-Hochberg method within each prespecified contrast family.
+
+## 3.1 Temporal trajectory model
+
+```{r trajectory-function}
+phase_contrasts <- list(
+  `6M - BL` = c(-1, 1, 0),
+  `12M - 6M` = c(0, -1, 1),
+  `12M - BL` = c(-1, 0, 1)
+)
+
+phase_labels <- c(
+  `6M - BL` = "Weight loss (BL to 6M)",
+  `12M - 6M` = "Weight regain (6M to 12M)",
+  `12M - BL` = "Net change (BL to 12M)"
+)
+
+run_trajectory_models <- function(mat, meta, platform) {
+  purrr::map_dfr(names(mat), function(feature_name) {
+    dat <- tibble(SampleID = rownames(mat), outcome = mat[[feature_name]]) %>%
+      left_join(meta, by = "SampleID") %>%
+      drop_na(outcome, Timepoint, Age, Sex, BMI, StudyNr) %>%
+      mutate(Timepoint = factor(Timepoint, levels = time_levels), StudyNr = factor(StudyNr))
+    if (n_distinct(dat$Timepoint) < 2 || n_distinct(dat$StudyNr) < 5) return(NULL)
+
+    tryCatch({
+      fit <- lmerTest::lmer(
+        outcome ~ Timepoint + Age + Sex + BMI + (1 | StudyNr),
+        data = dat, REML = FALSE
+      )
+      emmeans::emmeans(fit, ~ Timepoint) %>%
+        emmeans::contrast(method = phase_contrasts, adjust = "none") %>%
+        summary(infer = c(TRUE, TRUE)) %>%
+        as.data.frame() %>%
+        transmute(
+          platform, feature = feature_name, contrast,
+          phase = unname(phase_labels[contrast]),
+          estimate, std.error = SE, df,
+          conf.low = lower.CL, conf.high = upper.CL,
+          statistic = t.ratio, p.value,
+          n_observations = nrow(dat), n_participants = n_distinct(dat$StudyNr),
+          singular = lme4::isSingular(fit)
+        )
+    }, error = function(e) NULL)
+  }) %>%
+    group_by(contrast) %>%
+    mutate(fdr = p.adjust(p.value, method = "BH")) %>%
+    ungroup() %>%
+    mutate(
+      phase = factor(phase, levels = unname(phase_labels)),
+      significance = significance_label(p.value, fdr)
+    ) %>%
+    arrange(phase, p.value)
+}
+
+lipid_trajectory <- run_trajectory_models(norm_lipids, lipid_data$metadata, "Lipidomics")
+metab_trajectory <- run_trajectory_models(norm_metab, metab_data$metadata, "Metabolomics")
+pfas_trajectory <- run_trajectory_models(log2_pfas, pfas_data$metadata, "PFAS")
+```
+
+## 3.2 Randomization-by-timepoint model
+
+```{r time-interaction-function}
+run_time_interaction <- function(mat, meta, platform) {
+  purrr::map_dfr(names(mat), function(feature_name) {
+    dat <- tibble(SampleID = rownames(mat), outcome = mat[[feature_name]]) %>%
+      left_join(meta, by = "SampleID") %>%
+      drop_na(outcome, Timepoint, Group, Age, Sex, BMI, StudyNr) %>%
+      mutate(
+        Timepoint = factor(Timepoint, levels = time_levels),
+        Group = factor(Group, levels = group_levels),
+        StudyNr = factor(StudyNr)
+      )
+    if (n_distinct(dat$Group) < 2 || n_distinct(dat$Timepoint) < 2) return(NULL)
+
+    tryCatch({
+      fit <- lmerTest::lmer(
+        outcome ~ Group * Timepoint + Age + Sex + BMI + (1 | StudyNr),
+        data = dat, REML = FALSE
+      )
+      broom.mixed::tidy(fit, effects = "fixed", conf.int = TRUE) %>%
+        filter(str_detect(term, "Group.*:Timepoint|Timepoint.*:Group")) %>%
+        transmute(
+          platform, feature = feature_name, term,
+          estimate, std.error, statistic, df, p.value,
+          conf.low, conf.high,
+          n_observations = nrow(dat), n_participants = n_distinct(dat$StudyNr),
+          singular = lme4::isSingular(fit)
+        )
+    }, error = function(e) NULL)
+  }) %>%
+    group_by(term) %>%
+    mutate(fdr = p.adjust(p.value, method = "BH")) %>%
+    ungroup() %>%
+    mutate(significance = significance_label(p.value, fdr)) %>%
+    arrange(term, p.value)
+}
+
+lipid_time_interaction <- run_time_interaction(norm_lipids, lipid_data$metadata, "Lipidomics")
+metab_time_interaction <- run_time_interaction(norm_metab, metab_data$metadata, "Metabolomics")
+pfas_time_interaction <- run_time_interaction(log2_pfas, pfas_data$metadata, "PFAS")
+```
+
+## 3.3 Randomization-by-phase interaction model
+
+```{r phase-interaction-function}
+run_phase_interaction <- function(mat, meta, platform) {
+  purrr::map_dfr(names(mat), function(feature_name) {
+    dat <- tibble(SampleID = rownames(mat), outcome = mat[[feature_name]]) %>%
+      left_join(meta, by = "SampleID") %>%
+      drop_na(outcome, Timepoint, Group, Age, Sex, BMI, StudyNr) %>%
+      mutate(
+        Timepoint = factor(Timepoint, levels = time_levels),
+        Group = factor(Group, levels = group_levels),
+        StudyNr = factor(StudyNr)
+      )
+    if (n_distinct(dat$Group) < 2 || n_distinct(dat$Timepoint) < 2) return(NULL)
+
+    tryCatch({
+      fit <- lmerTest::lmer(
+        outcome ~ Timepoint * Group + Age + Sex + BMI + (1 | StudyNr),
+        data = dat, REML = FALSE
+      )
+      emm <- emmeans::emmeans(fit, ~ Timepoint * Group)
+      interaction_result <- emmeans::contrast(
+        emm, interaction = list(Timepoint = phase_contrasts, Group = "revpairwise"),
+        adjust = "none"
+      )
+      interaction_df <- summary(interaction_result, infer = c(TRUE, TRUE)) %>% as.data.frame()
+      phase_col <- grep("^Timepoint", names(interaction_df), value = TRUE)[1]
+      group_col <- grep("^Group", names(interaction_df), value = TRUE)[1]
+      if (is.na(phase_col) || is.na(group_col)) stop("Could not identify emmeans interaction columns.")
+      interaction_df %>%
+        transmute(
+          platform, feature = feature_name, contrast = .data[[phase_col]],
+          phase = unname(phase_labels[.data[[phase_col]]]),
+          group_contrast = .data[[group_col]], estimate, std.error = SE, df,
+          conf.low = lower.CL, conf.high = upper.CL,
+          statistic = t.ratio, p.value,
+          n_observations = nrow(dat), n_participants = n_distinct(dat$StudyNr),
+          singular = lme4::isSingular(fit)
+        )
+    }, error = function(e) NULL)
+  }) %>%
+    group_by(contrast) %>%
+    mutate(fdr = p.adjust(p.value, method = "BH")) %>%
+    ungroup() %>%
+    mutate(
+      phase = factor(phase, levels = unname(phase_labels)),
+      significance = significance_label(p.value, fdr)
+    ) %>%
+    arrange(phase, p.value)
+}
+
+lipid_phase_interaction <- run_phase_interaction(norm_lipids, lipid_data$metadata, "Lipidomics")
+metab_phase_interaction <- run_phase_interaction(norm_metab, metab_data$metadata, "Metabolomics")
+pfas_phase_interaction <- run_phase_interaction(log2_pfas, pfas_data$metadata, "PFAS")
+```
+
+# Table 1. Participant characteristics
+
+```{r table-1}
+continuous_candidates <- c(
+  "Weight", "Weight_kg", "BMI", "Waist", "Waist_circumference",
+  "Systolic", "Diastolic", "HbA1c", "HOMAIR", "HOMA_IR",
+  "Total_cholesterol", "HDL", "LDL", "Triglycerides",
+  "GGT", "hsCRP", "CAP", "LSM", "Fib4", "FIB4"
+)
+continuous_vars <- intersect(continuous_candidates, names(metadata))
+
+if (length(continuous_vars) > 0) {
+  table1_continuous <- metadata %>%
+    select(Timepoint, Group, all_of(continuous_vars)) %>%
+    pivot_longer(all_of(continuous_vars), names_to = "Characteristic", values_to = "Value") %>%
+    mutate(Value = safe_numeric(Value)) %>%
+    group_by(Timepoint, Group, Characteristic) %>%
+    summarise(
+      n = sum(!is.na(Value)), mean = mean(Value, na.rm = TRUE), sd = sd(Value, na.rm = TRUE),
+      median = median(Value, na.rm = TRUE), q1 = quantile(Value, 0.25, na.rm = TRUE),
+      q3 = quantile(Value, 0.75, na.rm = TRUE), .groups = "drop"
+    )
+} else {
+  table1_continuous <- tibble(Note = "No prespecified continuous characteristic columns were found.")
+}
+
+table1_demographics <- metadata %>%
+  group_by(Timepoint, Group) %>%
+  summarise(
+    n = n(), age_mean = mean(Age, na.rm = TRUE), age_sd = sd(Age, na.rm = TRUE),
+    women_n = sum(str_detect(as.character(Sex), regex("female|woman|2", ignore_case = TRUE)), na.rm = TRUE),
+    .groups = "drop"
+  )
+
+openxlsx::write.xlsx(
+  list(Demographics = table1_demographics, Continuous = table1_continuous),
+  file.path(out_tab, "Table_1_participant_characteristics.xlsx"), overwrite = TRUE
+)
+knitr::kable(table1_demographics, digits = 1, caption = "Table 1. Participant characteristics by timepoint and randomized group")
+```
+
+# Figure 1. Global lipidomic and metabolomic structure
+
+```{r figure-1, fig.width=12, fig.height=5.5}
+plot_pca <- function(mat, meta, title) {
+  pca <- prcomp(mat, center = TRUE, scale. = FALSE)
+  variance <- 100 * pca$sdev^2 / sum(pca$sdev^2)
+  scores <- as.data.frame(pca$x[, 1:2, drop = FALSE]) %>%
+    rownames_to_column("SampleID") %>%
+    left_join(meta %>% select(SampleID, Timepoint, Group), by = "SampleID")
+
+  ggplot(scores, aes(PC1, PC2, color = Timepoint, shape = Group)) +
+    stat_ellipse(aes(group = Timepoint), level = 0.68, linetype = "dashed", linewidth = 0.4, show.legend = FALSE) +
+    geom_point(size = 2, alpha = 0.75) +
+    scale_color_manual(values = time_palette) +
+    labs(
+      title = title,
+      x = sprintf("PC1 (%.1f%%)", variance[1]),
+      y = sprintf("PC2 (%.1f%%)", variance[2]), color = "Timepoint", shape = "Group"
+    ) +
+    theme_bw(base_size = 11) + theme(panel.grid.minor = element_blank())
+}
+
+figure1 <- plot_pca(norm_lipids, lipid_data$metadata, "Lipidomics") +
+  plot_pca(norm_metab, metab_data$metadata, "Metabolomics") +
+  plot_layout(guides = "collect") + plot_annotation(tag_levels = "A")
+print(figure1)
+save_figure(figure1, "Figure_1_PCA", 12, 5.5)
+```
+
+# Figure 2. Temporal lipidomic and metabolomic changes
+
+Figure 2 retains all FDR-significant annotated features and supplements them with the strongest annotated nominal findings when needed for visual context. Complete results are reported in Supplementary Tables S1 and S2.
+
+```{r annotation-helper}
+annotate_results <- function(results, annotation) {
+  results %>%
+    mutate(join_key = feature_key(feature)) %>%
+    left_join(annotation %>% select(join_key, annotation_name, any_of("Family")), by = "join_key") %>%
+    mutate(
+      display_name = coalesce(annotation_name, feature),
+      known_annotation = !is.na(annotation_name) &
+        !str_detect(annotation_name, regex("unknown|unidentified", ignore_case = TRUE))
+    )
+}
+
+lipid_trajectory_annotated <- annotate_results(lipid_trajectory, lipid_annotation)
+metab_trajectory_annotated <- annotate_results(metab_trajectory, metab_annotation)
+```
+
+```{r figure-2, fig.width=12, fig.height=9}
+select_figure2_features <- function(df, top_n = 10) {
+  fdr_features <- df %>% filter(fdr <= fdr_cutoff, known_annotation) %>% pull(feature) %>% unique()
+  nominal_features <- df %>%
+    filter(p.value < 0.05, known_annotation) %>%
+    group_by(phase) %>% slice_min(p.value, n = top_n, with_ties = FALSE) %>%
+    ungroup() %>% pull(feature) %>% unique()
+  unique(c(fdr_features, nominal_features))
+}
+
+plot_temporal_forest <- function(df, title, top_n = 10) {
+  selected <- select_figure2_features(df, top_n)
+  plot_df <- df %>%
+    filter(feature %in% selected) %>%
+    mutate(display_name = fct_reorder(display_name, estimate))
+  ggplot(plot_df, aes(estimate, display_name, color = significance)) +
+    geom_vline(xintercept = 0, color = "grey60", linewidth = 0.4) +
+    geom_errorbar(aes(xmin = conf.low, xmax = conf.high), width = 0.2) +
+    geom_point(size = 2) +
+    facet_wrap(~ phase, scales = "free_y", ncol = 3) +
+    scale_color_manual(values = sig_palette, drop = FALSE) +
+    labs(title = title, x = "Adjusted change (standardized beta)", y = NULL, color = "Significance") +
+    theme_bw(base_size = 10) +
+    theme(legend.position = "top", strip.text = element_text(face = "bold"), panel.grid.minor = element_blank())
+}
+
+figure2 <- plot_temporal_forest(lipid_trajectory_annotated, "Lipidomics") /
+  plot_temporal_forest(metab_trajectory_annotated, "Metabolomics") +
+  plot_annotation(tag_levels = "A")
+print(figure2)
+save_figure(figure2, "Figure_2_temporal_changes", 12, 9)
+```
+
+# Figure 3. WGCNA module-trait relationships
+
+```{r wgcna-functions}
+pick_power <- function(mat, label = "") {
+  powers <- c(seq(1, 10, by = 1), seq(12, 20, by = 2))  # WGCNA default grid
+
+  sft <- WGCNA::pickSoftThreshold(
+    mat,
+    powerVector  = powers,
+    networkType  = "signed",
+    corFnc       = "bicor",
+    RsquaredCut  = 0.85,     # WGCNA default; keep consistent with "default settings" claim
+    verbose      = 0
+  )
+
+  fit <- -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2]
+  acceptable <- which(fit >= 0.85)
+
+  if (length(acceptable) > 0) {
+    power <- sft$fitIndices[min(acceptable), 1]
+  } else {
+    power <- sft$fitIndices[which.max(fit), 1]
+    warning(
+      label, ": no power reached R\u00b2 >= 0.85 (max observed = ",
+      round(max(fit, na.rm = TRUE), 3), "). Using power = ", power,
+      " (best available fit)."
+    )
+  }
+
+  message(label, ": selected soft-thresholding power = ", power,
+          " (fit R\u00b2 = ", round(fit[sft$fitIndices[, 1] == power], 3), ")")
+  power
+}
+
+run_wgcna <- function(mat, prefix, label = "") {
+
+  # --- basic QC before clustering (recommended WGCNA step, silently skipped before) ---
+  gsg <- WGCNA::goodSamplesGenes(mat, verbose = 0)
+  if (!gsg$allOK) {
+    n_bad_features <- sum(!gsg$goodGenes)
+    n_bad_samples  <- sum(!gsg$goodSamples)
+    warning(
+      label, ": removing ", n_bad_features, " low-quality feature(s) and ",
+      n_bad_samples, " low-quality sample(s) before WGCNA."
+    )
+    mat <- mat[gsg$goodSamples, gsg$goodGenes, drop = FALSE]
+  }
+
+  power <- pick_power(mat, label)
+
+  set.seed(42)  # blockwiseModules/cutreeDynamic are deterministic, but pin the seed for safety
+  modules <- WGCNA::blockwiseModules(
+    mat,
+    power          = power,
+    networkType    = "signed",
+    TOMType        = "signed",
+    corType        = "bicor",
+    maxPOutliers   = 1,        # explicit default; documents intent, matches "default settings"
+    deepSplit      = 2,
+    minModuleSize  = 20,
+    mergeCutHeight = 0.20,
+    numericLabels  = TRUE,
+    saveTOMs       = FALSE,
+    maxBlockSize   = 8000,
+    nThreads       = params$n_threads,
+    verbose        = 0
+  )
+
+  n_modules <- length(unique(modules$colors)) - as.integer(0 %in% modules$colors)
+  message(label, ": detected ", n_modules, " module(s) (excluding unassigned/grey), power = ", power)
+  print(table(modules$colors))
+
+  eigengenes <- WGCNA::orderMEs(WGCNA::moduleEigengenes(mat, modules$colors)$eigengenes)
+  names(eigengenes) <- sub("^ME", paste0(prefix, "_"), names(eigengenes))
+  eigengenes <- eigengenes[, !str_detect(names(eigengenes), paste0(prefix, "_0$")), drop = FALSE]
+
+  list(power = power, modules = modules, eigengenes = eigengenes, mat = mat)
+}
+
+numeric_traits <- function(meta) {
+  # Defensive name handling: match candidate clinical columns regardless of
+  # punctuation/case differences in the source Metadata.xlsx (e.g. "HOMA-IR" vs "HOMAIR").
+  clean_lookup <- function(df, candidates) {
+    nm <- names(df)
+    nm_clean <- toupper(gsub("[^A-Za-z0-9]", "", nm))
+    hits <- nm[nm_clean %in% toupper(gsub("[^A-Za-z0-9]", "", candidates))]
+    unique(hits)
+  }
+
+  clinical_candidates <- c("Insulin", "HOMAIR", "HOMA_IR", "HOMA-IR",
+                            "GGT", "hsCRP", "Fib4", "FIB4", "FIB-4")
+  clinical_cols <- clean_lookup(meta, clinical_candidates)
+
+  base <- meta %>%
+    transmute(
+      SampleID,
+      Randomisation = as.numeric(Group) - 1,
+      Timepoint     = as.numeric(Timepoint),
+      Age, Sex = as.numeric(Sex), BMI
+    )
+
+  if (length(clinical_cols) > 0) {
+    extra <- meta %>%
+      dplyr::select(SampleID, all_of(clinical_cols)) %>%
+      dplyr::mutate(across(-SampleID, safe_numeric))
+    base <- dplyr::left_join(base, extra, by = "SampleID")
+  } else {
+    warning("numeric_traits(): no clinical columns (Insulin/HOMA-IR/GGT/hsCRP/FIB-4) were matched in metadata.")
+  }
+
+  base %>%
+    column_to_rownames("SampleID") %>%
+    select(where(~ sum(is.finite(.x)) >= 3 && n_distinct(.x[is.finite(.x)]) > 1))
+}
+
+module_trait_test <- function(wgcna_result, meta, platform) {
+  me <- as.data.frame(wgcna_result$eigengenes)
+  traits <- numeric_traits(meta)
+  common <- intersect(rownames(me), rownames(traits))
+
+  if (length(common) < 3) {
+    stop(platform, ": fewer than 3 samples with matched eigengenes and traits. ",
+         "Check sample-ID alignment (see align_platform / sample_id_column).")
+  }
+
+  me <- me[common, , drop = FALSE]
+  traits <- traits[common, , drop = FALSE]
+
+  tidyr::crossing(module = names(me), trait = names(traits)) %>%
+    mutate(test = map2(module, trait, ~ {
+      keep <- is.finite(me[[.x]]) & is.finite(traits[[.y]])
+      suppressWarnings(cor.test(me[[.x]][keep], traits[[.y]][keep], method = "spearman", exact = FALSE))
+    })) %>%
+    transmute(
+      platform, module, trait,
+      rho = map_dbl(test, ~ unname(.x$estimate)), p.value = map_dbl(test, "p.value"),
+      n = map2_int(module, trait, ~ sum(is.finite(me[[.x]]) & is.finite(traits[[.y]])))
+    ) %>%
+    mutate(fdr = p.adjust(p.value, method = "BH"))
+}
+
+module_membership_table <- function(wgcna_result, mat, annotation, platform, prefix) {
+  tibble(
+    platform, feature = colnames(mat),
+    module_number = wgcna_result$modules$colors,
+    module = paste0(prefix, "_", module_number),
+    module_color = WGCNA::labels2colors(module_number)
+  ) %>%
+    mutate(join_key = feature_key(feature)) %>%
+    left_join(annotation, by = "join_key")
+}
+```
+
+```{r wgcna-run}
+wgcna_lipid <- run_wgcna(norm_lipids, "LC", "Lipidomics")
+wgcna_metab <- run_wgcna(norm_metab, "MC", "Metabolomics")
+
+module_trait_lipid <- module_trait_test(wgcna_lipid, lipid_data$metadata, "Lipidomics")
+module_trait_metab <- module_trait_test(wgcna_metab, metab_data$metadata, "Metabolomics")
+module_trait_all <- bind_rows(module_trait_lipid, module_trait_metab)
+
+# module_membership_table now uses colnames(mat) (post-goodSamplesGenes) rather than
+# names(norm_lipids)/names(norm_metab), so feature counts always match modules$colors length
+module_membership_lipid <- module_membership_table(wgcna_lipid, wgcna_lipid$mat, lipid_annotation, "Lipidomics", "LC")
+module_membership_metab <- module_membership_table(wgcna_metab, wgcna_metab$mat, metab_annotation, "Metabolomics", "MC")
+module_membership_all <- bind_rows(module_membership_lipid, module_membership_metab)
+
+# Sanity check against the manuscript-reported module counts
+message("Lipid modules detected: ", n_distinct(module_membership_lipid$module[module_membership_lipid$module_number != 0]))
+message("Metabolite modules detected: ", n_distinct(module_membership_metab$module[module_membership_metab$module_number != 0]))
+```
+
+```{r figure-3, fig.width=11, fig.height=9}
+plot_module_heatmap <- function(df, title) {
+  cor_mat <- df %>% select(module, trait, rho) %>% pivot_wider(names_from = trait, values_from = rho) %>%
+    column_to_rownames("module") %>% as.matrix()
+  fdr_mat <- df %>% select(module, trait, fdr) %>% pivot_wider(names_from = trait, values_from = fdr) %>%
+    column_to_rownames("module") %>% as.matrix()
+  stars <- matrix("", nrow(cor_mat), ncol(cor_mat), dimnames = dimnames(cor_mat))
+  stars[fdr_mat <= 0.10] <- "*"; stars[fdr_mat <= 0.01] <- "**"; stars[fdr_mat <= 0.001] <- "***"
+  pheatmap::pheatmap(
+    cor_mat, color = colorRampPalette(c("#2166AC", "white", "#B2182B"))(101),
+    breaks = seq(-1, 1, length.out = 102), display_numbers = stars,
+    cluster_rows = TRUE, cluster_cols = TRUE, border_color = "white",
+    main = title, silent = TRUE
+  )
+}
+
+heat_metab <- plot_module_heatmap(module_trait_metab, "A  Metabolomics")
+heat_lipid <- plot_module_heatmap(module_trait_lipid, "B  Lipidomics")
+grid::grid.newpage()
+figure3 <- gridExtra::arrangeGrob(heat_metab$gtable, heat_lipid$gtable, ncol = 1)
+grid::grid.draw(figure3)
+ggsave(file.path(out_fig, "Figure_3_WGCNA_module_trait.pdf"), figure3, width = 11, height = 9)
+ggsave(file.path(out_fig, "Figure_3_WGCNA_module_trait.png"), figure3, width = 11, height = 9, dpi = 400)
+```
+
+# Figure 4. Adjusted PFAS trajectories by randomized group
+
+```{r figure-4-models}
+fit_pfas_emmeans <- function(mat, meta) {
+  purrr::map_dfr(names(mat), function(feature_name) {
+    dat <- tibble(SampleID = rownames(mat), outcome = mat[[feature_name]]) %>%
+      left_join(meta, by = "SampleID") %>%
+      drop_na(outcome, Timepoint, Group, Age, Sex, BMI, StudyNr) %>%
+      mutate(Timepoint = factor(Timepoint, levels = time_levels), Group = factor(Group, levels = group_levels), StudyNr = factor(StudyNr))
+    tryCatch({
+      fit <- lmerTest::lmer(outcome ~ Timepoint * Group + Age + Sex + BMI + (1 | StudyNr), data = dat, REML = FALSE)
+      emmeans::emmeans(fit, ~ Timepoint * Group) %>% summary(infer = c(TRUE, TRUE)) %>% as.data.frame() %>%
+        transmute(feature = feature_name, Timepoint, Group, emmean, SE, conf.low = lower.CL, conf.high = upper.CL)
+    }, error = function(e) NULL)
+  })
+}
+
+pfas_emmeans <- fit_pfas_emmeans(log2_pfas, pfas_data$metadata)
+pfas_sig_features <- pfas_phase_interaction %>% filter(fdr <= fdr_cutoff) %>% pull(feature) %>% unique()
+```
+
+```{r figure-4, fig.width=12, fig.height=8}
+figure4 <- ggplot(pfas_emmeans, aes(Timepoint, emmean, color = Group, group = Group)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high, fill = Group), alpha = 0.12, color = NA) +
+  geom_line(linewidth = 0.8) + geom_point(size = 1.8) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.08, linewidth = 0.4) +
+  facet_wrap(~ feature, scales = "free_y", ncol = 3, labeller = labeller(
+    feature = function(x) ifelse(x %in% pfas_sig_features, paste0(x, " *"), x)
+  )) +
+  scale_color_manual(values = group_palette) + scale_fill_manual(values = group_palette) +
+  labs(
+    x = "Timepoint", y = "Adjusted mean log2 concentration",
+    color = "Randomized group", fill = "Randomized group",
+    caption = "* FDR <= 0.10 for the prespecified randomization-by-phase interaction."
+  ) +
+  theme_bw(base_size = 11) + theme(legend.position = "top", strip.text = element_text(face = "bold"))
+print(figure4)
+save_figure(figure4, "Figure_4_adjusted_PFAS_trajectories", 12, 8)
+```
+
+# Supplementary Table S1. Lipidomic temporal contrasts
+
+```{r supplementary-table-s1}
+supp_s1 <- lipid_trajectory_annotated %>%
+  select(feature, annotation_name, any_of("Family"), phase, estimate, std.error,
+         conf.low, conf.high, statistic, df, p.value, fdr, significance,
+         n_observations, n_participants, singular)
+openxlsx::write.xlsx(supp_s1, file.path(out_tab, "Supplementary_Table_S1_lipidomics.xlsx"), overwrite = TRUE)
+knitr::kable(head(supp_s1, 20), digits = 4, caption = "Supplementary Table S1. Lipidomic temporal contrasts, first 20 rows")
+```
+
+# Supplementary Table S2. Metabolomic temporal contrasts
+
+```{r supplementary-table-s2}
+supp_s2 <- metab_trajectory_annotated %>%
+  select(feature, annotation_name, any_of("Family"), phase, estimate, std.error,
+         conf.low, conf.high, statistic, df, p.value, fdr, significance,
+         n_observations, n_participants, singular)
+openxlsx::write.xlsx(supp_s2, file.path(out_tab, "Supplementary_Table_S2_metabolomics.xlsx"), overwrite = TRUE)
+knitr::kable(head(supp_s2, 20), digits = 4, caption = "Supplementary Table S2. Metabolomic temporal contrasts, first 20 rows")
+```
+
+# Supplementary Table S3. WGCNA module-trait associations
+
+```{r supplementary-table-s3}
+supp_s3 <- module_trait_all %>% arrange(platform, fdr, p.value)
+openxlsx::write.xlsx(supp_s3, file.path(out_tab, "Supplementary_Table_S3_module_trait.xlsx"), overwrite = TRUE)
+knitr::kable(head(supp_s3, 20), digits = 4, caption = "Supplementary Table S3. WGCNA module-trait associations, first 20 rows")
+```
+
+# Supplementary Table S4. WGCNA module membership
+
+```{r supplementary-table-s4}
+supp_s4 <- module_membership_all %>% arrange(platform, module, feature)
+openxlsx::write.xlsx(supp_s4, file.path(out_tab, "Supplementary_Table_S4_module_membership.xlsx"), overwrite = TRUE)
+knitr::kable(head(supp_s4, 20), caption = "Supplementary Table S4. Module membership and annotation, first 20 rows")
+```
+
+# Supplementary Table S5. Analytical methods
+
+Supplementary Table S5 contains UHPLC-QTOFMS acquisition and MZmine processing settings. It is a methods table rather than an analysis output and should remain in the manuscript supplement. The computational pipeline does not regenerate it.
+
+# Supplementary Table S6. Randomization-by-timepoint interactions
+
+```{r supplementary-table-s6}
+supp_s6 <- bind_rows(lipid_time_interaction, metab_time_interaction, pfas_time_interaction) %>%
+  arrange(platform, term, p.value)
+openxlsx::write.xlsx(
+  list(
+    All_platforms = supp_s6,
+    Lipidomics = lipid_time_interaction,
+    Metabolomics = metab_time_interaction,
+    PFAS = pfas_time_interaction
+  ),
+  file.path(out_tab, "Supplementary_Table_S6_timepoint_interactions.xlsx"), overwrite = TRUE
+)
+knitr::kable(head(supp_s6, 20), digits = 4, caption = "Supplementary Table S6. Randomization-by-timepoint interactions, first 20 rows")
+```
+
+# Supplementary Table S7. Randomization-by-phase interactions
+
+```{r supplementary-table-s7}
+supp_s7 <- bind_rows(lipid_phase_interaction, metab_phase_interaction, pfas_phase_interaction) %>%
+  arrange(platform, phase, p.value)
+openxlsx::write.xlsx(
+  list(
+    All_platforms = supp_s7,
+    Lipidomics = lipid_phase_interaction,
+    Metabolomics = metab_phase_interaction,
+    PFAS = pfas_phase_interaction
+  ),
+  file.path(out_tab, "Supplementary_Table_S7_phase_interactions.xlsx"), overwrite = TRUE
+)
+knitr::kable(head(supp_s7, 20), digits = 4, caption = "Supplementary Table S7. Randomization-by-phase interactions, first 20 rows")
+```
+
+# Supplementary quality-control outputs
+
+These outputs are useful for audit and reproducibility but are not separate manuscript analyses.
+
+```{r supplementary-qc}
+analysis_counts <- bind_rows(
+  lipid_trajectory %>% count(platform, phase, name = "tests") %>% mutate(analysis = "Trajectory"),
+  metab_trajectory %>% count(platform, phase, name = "tests") %>% mutate(analysis = "Trajectory"),
+  pfas_trajectory %>% count(platform, phase, name = "tests") %>% mutate(analysis = "Trajectory"),
+  lipid_phase_interaction %>% count(platform, phase, name = "tests") %>% mutate(analysis = "Phase interaction"),
+  metab_phase_interaction %>% count(platform, phase, name = "tests") %>% mutate(analysis = "Phase interaction"),
+  pfas_phase_interaction %>% count(platform, phase, name = "tests") %>% mutate(analysis = "Phase interaction")
+)
+
+significant_counts <- bind_rows(lipid_trajectory, metab_trajectory, pfas_trajectory) %>%
+  group_by(platform, phase) %>%
+  summarise(
+    tests = n(), nominal_p_lt_0_05 = sum(p.value < 0.05, na.rm = TRUE),
+    fdr_le_0_10 = sum(fdr <= fdr_cutoff, na.rm = TRUE), .groups = "drop"
+  )
+
+reversal_table <- metab_trajectory %>%
+  filter(contrast %in% c("6M - BL", "12M - 6M")) %>%
+  select(feature, contrast, estimate, fdr) %>%
+  pivot_wider(names_from = contrast, values_from = c(estimate, fdr)) %>%
+  mutate(
+    significant_both = `fdr_6M - BL` <= fdr_cutoff & `fdr_12M - 6M` <= fdr_cutoff,
+    reversal_pattern = case_when(
+      `estimate_6M - BL` < 0 & `estimate_12M - 6M` > 0 ~ "Decrease then increase",
+      `estimate_6M - BL` > 0 & `estimate_12M - 6M` < 0 ~ "Increase then decrease",
+      `estimate_6M - BL` > 0 & `estimate_12M - 6M` > 0 ~ "Continued increase",
+      `estimate_6M - BL` < 0 & `estimate_12M - 6M` < 0 ~ "Continued decrease",
+      TRUE ~ "No clear direction"
+    )
+  )
+
+openxlsx::write.xlsx(
+  list(
+    Analysis_counts = analysis_counts,
+    Significant_counts = significant_counts,
+    Metabolite_reversals = reversal_table,
+    PFAS_adjusted_means = pfas_emmeans,
+    PFAS_trajectory = pfas_trajectory,
+    PFAS_time_interaction = pfas_time_interaction,
+    PFAS_phase_interaction = pfas_phase_interaction
+  ),
+  file.path(out_tab, "Supplementary_QC_and_PFAS_details.xlsx"), overwrite = TRUE
+)
+```
+
+# Final validation and session information
+
+```{r final-validation}
+expected_files <- c(
+  file.path(out_fig, "Figure_1_PCA.pdf"),
+  file.path(out_fig, "Figure_2_temporal_changes.pdf"),
+  file.path(out_fig, "Figure_3_WGCNA_module_trait.pdf"),
+  file.path(out_fig, "Figure_4_adjusted_PFAS_trajectories.pdf"),
+  file.path(out_tab, "Supplementary_Table_S1_lipidomics.xlsx"),
+  file.path(out_tab, "Supplementary_Table_S2_metabolomics.xlsx"),
+  file.path(out_tab, "Supplementary_Table_S3_module_trait.xlsx"),
+  file.path(out_tab, "Supplementary_Table_S4_module_membership.xlsx"),
+  file.path(out_tab, "Supplementary_Table_S6_timepoint_interactions.xlsx"),
+  file.path(out_tab, "Supplementary_Table_S7_phase_interactions.xlsx")
+)
+
+validation <- tibble(file = expected_files, exists = file.exists(expected_files), bytes = file.size(expected_files))
+print(validation)
+if (!all(validation$exists)) warning("Some expected manuscript outputs were not created. Review the validation table.")
+
+writeLines(capture.output(sessionInfo()), file.path(out_tab, "sessionInfo.txt"))
+message("Analysis complete. Figures: ", out_fig)
+message("Analysis complete. Tables: ", out_tab)
+```
