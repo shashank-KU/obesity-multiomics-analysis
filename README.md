@@ -85,11 +85,10 @@ obesity-multiomics-analysis
 │                           VISUALIZATION                                      │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │ • Longitudinal trajectories                                                  │
-│ • Volcano plots                                                              │
+│ • Forest plots                                                               │
 │ • Heatmaps                                                                   │
 │ • Module–trait correlation heatmaps                                          │
 │ • Network summaries                                                          │
-│ • Publication-quality figures                                                │
 └──────────────────────────────────────────────────────────────────────────────┘
                                         │
                                         ▼
