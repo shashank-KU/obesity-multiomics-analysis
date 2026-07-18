@@ -31,40 +31,79 @@ obesity-multiomics-analysis
 ---
 
 ## Analysis Workflow
+```text
+                                      STUDY DESIGN
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ Randomized Obesity Intervention Trial                                        │
+│                                                                              │
+│ Participants → Baseline (BL) → 6 Months → 12 Months                          │
+│                      │              │            │                            │
+│                      └──────── Longitudinal Clinical Follow-up ──────────────┘
+└──────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                           DATA ACQUISITION                                   │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ • Clinical metadata                                                          │
+│ • Lipidomics                                                                 │
+│ • Metabolomics                                                               │
+│ • PFAS measurements                                                          │
+└──────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                           PREPROCESSING                                      │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ • Sample filtering                                                           │
+│ • Feature filtering (missingness threshold)                                  │
+│ • Half-minimum imputation                                                    │
+│ • Log2 transformation                                                        │
+│ • Autoscaling                                                                │
+│ • Metadata harmonization                                                     │
+└──────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+        ┌─────────────────────────────────────────────────────────────┐
+        │                                                             │
+        ▼                                                             ▼
+┌──────────────────────────────┐                     ┌──────────────────────────┐
+│ Longitudinal Statistics      │                     │ Network Analysis         │
+├──────────────────────────────┤                     ├──────────────────────────┤
+│ • Linear mixed models        │                     │ • WGCNA                 │
+│ • Estimated marginal means   │                     │ • Soft thresholding     │
+│ • Pairwise contrasts         │                     │ • Module detection      │
+│ • Phase comparisons          │                     │ • Eigengene calculation │
+│ • Group × Time interaction   │                     │ • Module–trait analysis │
+│ • Group × Phase interaction  │                     │ • Hub feature detection │
+│ • FDR correction             │                     │                          │
+└──────────────────────────────┘                     └──────────────────────────┘
+        │                                                             │
+        └──────────────────────────────┬──────────────────────────────┘
+                                       ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                           VISUALIZATION                                      │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ • Longitudinal trajectories                                                  │
+│ • Volcano plots                                                              │
+│ • Heatmaps                                                                   │
+│ • Module–trait correlation heatmaps                                          │
+│ • Network summaries                                                          │
+│ • Publication-quality figures                                                │
+└──────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              OUTPUTS                                         │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ ✓ Statistical result tables                                                  │
+│ ✓ Estimated marginal means                                                   │
+│ ✓ WGCNA module assignments                                                   │
+│ ✓ Publication figures (PDF/PNG)                                              │
+│ ✓ Supplementary Excel tables                                                 │
+│ ✓ Reproducible manuscript report (HTML)                                      │
+└──────────────────────────────────────────────────────────────────────────────┘
 
-```
-Clinical metadata
-        │
-        ▼
-Data import
-        │
-        ▼
-Quality control
-        │
-        ▼
-Missing value imputation
-        │
-        ▼
-Log2 transformation
-        │
-        ▼
-Autoscaling
-        │
-        ▼
-──────────────────────────────────────────────
-│                                            │
-▼                                            ▼
-Linear mixed models                    WGCNA
-│                                            │
-▼                                            ▼
-Estimated marginal means          Module eigengenes
-│                                            │
-▼                                            ▼
-Trajectory analysis              Module–trait associations
-│                                            │
-└──────────────┬─────────────────────────────┘
-               ▼
-Publication figures & supplementary tables
 ```
 
 ---
