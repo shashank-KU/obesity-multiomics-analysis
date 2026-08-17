@@ -18,7 +18,6 @@ A reproducible R workflow for longitudinal multi-omics analysis of weight loss a
 - [✨ Key Features](#key-features)
 - [🗂️ Repository Structure](#repository-structure)
 - [🔄 Analysis Pipeline](#analysis-pipeline)
-- [📊 Figures](#figures)
 - [📈 Statistical Methods](#statistical-methods)
 - [⚙️ Requirements and Installation](#requirements-and-installation)
 - [▶️ Usage](#usage)
@@ -141,31 +140,6 @@ flowchart TD
 
 **Preprocessing** covers sample and feature filtering (missingness threshold), half-minimum imputation, log2 transformation, autoscaling, and metadata harmonization, applied identically across all three omics platforms before either branch of the analysis.
 
-## Figures
-
-The workflow generates publication-ready figures as matched PDF/PNG pairs. GitHub can only preview PNG (or other raster/SVG) images inline — a linked PDF shows as a download, not a thumbnail — so keeping a PNG export of each figure in `Figures/` is what makes them render directly in this README.
-
-The workflow generates publication-ready figures as matched PDF/PNG pairs. GitHub can preview PNG (or other raster/SVG) images inline, while PDF files are available as high-resolution downloads. Both formats are therefore retained in the `Figures/` directory.
-
-
-
-<p align="center">
-  <img src="Figures/Figure_1.pdf" width="45%" alt="Figure 1">
-  <img src="Figures/Figure_2.pdf" width="45%" alt="Figure 2">
-</p>
-<p align="center">
-  <img src="Figures/Figure_3.png" width="45%" alt="Figure 3">
-  <img src="Figures/Figure_4.pdf" width="45%" alt="Figure 4 – PFAS trajectories">
-</p>
-
-| Figure | Contents |
-|---|---|
-| `Figure_1` | *add caption* |
-| `Figure_2` | *add caption* |
-| `Figure_3` | *add caption* |
-| `Figure_4` | PFAS longitudinal trajectories (8-analyte panel) |
-
-> 💡 Only `Figure_4.pdf` is confirmed in the current repository. Add a PNG export for each figure and fill in the captions above — once filenames match, the gallery renders automatically with no other changes needed.
 
 ## Statistical Methods
 
