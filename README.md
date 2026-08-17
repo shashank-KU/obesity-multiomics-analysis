@@ -146,12 +146,12 @@ flowchart TD
 The workflow generates publication-ready figures as matched PDF/PNG pairs. GitHub can only preview PNG (or other raster/SVG) images inline — a linked PDF shows as a download, not a thumbnail — so keeping a PNG export of each figure in `Figures/` is what makes them render directly in this README.
 
 <p align="center">
-  <img src="Figures/Figure_1.png" width="45%" alt="Figure 1">
-  <img src="Figures/Figure_2.png" width="45%" alt="Figure 2">
+  <img src="Figures/Figure_1.pdd" width="45%" alt="Figure 1">
+  <img src="Figures/Figure_2.pdf" width="45%" alt="Figure 2">
 </p>
 <p align="center">
   <img src="Figures/Figure_3.png" width="45%" alt="Figure 3">
-  <img src="Figures/Figure_4.png" width="45%" alt="Figure 4 – PFAS trajectories">
+  <img src="Figures/Figure_4.pdf" width="45%" alt="Figure 4 – PFAS trajectories">
 </p>
 
 | Figure | Contents |
